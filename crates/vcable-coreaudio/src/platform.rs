@@ -1,4 +1,7 @@
-use crate::{AudioDevice, AudioRoute, CoreAudioError};
+use crate::pcm::{CaptureCallbackState, PlaybackCallbackState};
+use crate::{
+    AudioDevice, AudioRoute, CoreAudioError, PcmStreamConfig, PcmStreamDirection, PcmStreamError,
+};
 use std::collections::BTreeMap;
 use std::ffi::{c_char, c_void};
 use std::ptr;
@@ -12,6 +15,7 @@ type AudioObjectId = u32;
 type OsStatus = i32;
 type CfStringRef = *const c_void;
 type AudioDeviceIoProcId = *mut c_void;
+type AudioDeviceIoControl = unsafe extern "C" fn(AudioObjectId, AudioDeviceIoProcId) -> OsStatus;
 
 const SYSTEM_OBJECT: AudioObjectId = 1;
 const SCOPE_GLOBAL: u32 = fourcc(*b"glob");
@@ -28,6 +32,12 @@ const DEVICE_TRANSPORT_TYPE: u32 = fourcc(*b"tran");
 const DEVICE_STREAM_CONFIGURATION: u32 = fourcc(*b"slay");
 const DEVICE_STREAMS: u32 = fourcc(*b"stm#");
 const DEVICE_IOPROC_STREAM_USAGE: u32 = fourcc(*b"suse");
+const STREAM_VIRTUAL_FORMAT: u32 = fourcc(*b"sfmt");
+const FORMAT_LINEAR_PCM: u32 = fourcc(*b"lpcm");
+const FORMAT_FLAG_IS_FLOAT: u32 = 1 << 0;
+const FORMAT_FLAG_IS_BIG_ENDIAN: u32 = 1 << 1;
+const FORMAT_FLAG_IS_PACKED: u32 = 1 << 3;
+const FORMAT_FLAG_IS_NON_INTERLEAVED: u32 = 1 << 5;
 const VCABLE_CONTROL: u32 = fourcc(*b"vctl");
 const VCABLE_BUNDLE_ID: &str = "dev.vcable.driver";
 const VCABLE_UID_PREFIX: &str = "dev.vcable.device.";
@@ -67,6 +77,20 @@ struct AudioHardwareIoProcStreamUsageHeader {
     io_proc: *mut c_void,
     number_streams: u32,
     first_stream_is_on: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct AudioStreamBasicDescription {
+    sample_rate: f64,
+    format_id: u32,
+    format_flags: u32,
+    bytes_per_packet: u32,
+    frames_per_packet: u32,
+    bytes_per_frame: u32,
+    channels_per_frame: u32,
+    bits_per_channel: u32,
+    reserved: u32,
 }
 
 #[link(name = "CoreAudio", kind = "framework")]
@@ -366,8 +390,18 @@ impl AudioRouter {
                     &mut context.procedure_id,
                 )
             })?;
-            configure_stream_usage(context, SCOPE_INPUT, !context.outgoing.is_empty())?;
-            configure_stream_usage(context, SCOPE_OUTPUT, !context.incoming.is_empty())?;
+            configure_stream_usage(
+                context.device_id,
+                context.procedure_id,
+                SCOPE_INPUT,
+                !context.outgoing.is_empty(),
+            )?;
+            configure_stream_usage(
+                context.device_id,
+                context.procedure_id,
+                SCOPE_OUTPUT,
+                !context.incoming.is_empty(),
+            )?;
         }
         for context in &mut router.contexts {
             // Safety: the procedure ID was created for this device above.
@@ -398,6 +432,228 @@ impl Drop for AudioRouter {
             }
         }
     }
+}
+
+pub(crate) struct PcmDevice {
+    object_id: AudioObjectId,
+    pub(crate) sample_rate: u32,
+}
+
+enum PcmCallback {
+    Playback(PlaybackCallbackState),
+    Capture(CaptureCallbackState),
+    #[cfg(test)]
+    Test,
+}
+
+struct PcmIoContext {
+    callback: PcmCallback,
+}
+
+pub(crate) struct PcmPlatformStream {
+    device_id: AudioObjectId,
+    procedure_id: AudioDeviceIoProcId,
+    running: bool,
+    stop: AudioDeviceIoControl,
+    destroy: AudioDeviceIoControl,
+    // The box owns the stable client-data pointer until the IOProc is destroyed.
+    _context: Box<PcmIoContext>,
+}
+
+impl PcmPlatformStream {
+    pub(crate) fn start_playback(
+        device: PcmDevice,
+        callback: PlaybackCallbackState,
+    ) -> Result<Self, PcmStreamError> {
+        Self::start(device, PcmCallback::Playback(callback), false, true)
+    }
+
+    pub(crate) fn start_capture(
+        device: PcmDevice,
+        callback: CaptureCallbackState,
+    ) -> Result<Self, PcmStreamError> {
+        Self::start(device, PcmCallback::Capture(callback), true, false)
+    }
+
+    fn start(
+        device: PcmDevice,
+        callback: PcmCallback,
+        input_enabled: bool,
+        output_enabled: bool,
+    ) -> Result<Self, PcmStreamError> {
+        let mut context = Box::new(PcmIoContext { callback });
+        let context_pointer: *mut PcmIoContext = &mut *context;
+        let mut stream = Self {
+            device_id: device.object_id,
+            procedure_id: ptr::null_mut(),
+            running: false,
+            stop: AudioDeviceStop,
+            destroy: AudioDeviceDestroyIOProcID,
+            _context: context,
+        };
+
+        // Safety: the boxed context remains stable until this stream destroys the IOProc.
+        let create_status = unsafe {
+            AudioDeviceCreateIOProcID(
+                stream.device_id,
+                Some(pcm_audio_device_io_proc),
+                context_pointer.cast(),
+                &mut stream.procedure_id,
+            )
+        };
+        if create_status != 0 {
+            // Some HAL implementations may populate the ID even when creation fails.
+            // Drop destroys it before the error is returned.
+            return Err(PcmStreamError::CoreAudioOsStatus(create_status));
+        }
+
+        configure_stream_usage(
+            stream.device_id,
+            stream.procedure_id,
+            SCOPE_INPUT,
+            input_enabled,
+        )
+        .map_err(PcmStreamError::from)?;
+        configure_stream_usage(
+            stream.device_id,
+            stream.procedure_id,
+            SCOPE_OUTPUT,
+            output_enabled,
+        )
+        .map_err(PcmStreamError::from)?;
+
+        // Safety: the procedure ID was created for this device above.
+        let start_status = unsafe { AudioDeviceStart(stream.device_id, stream.procedure_id) };
+        Self::finish_start(stream, start_status)
+    }
+
+    fn finish_start(mut stream: Self, start_status: OsStatus) -> Result<Self, PcmStreamError> {
+        if start_status != 0 {
+            return Err(PcmStreamError::CoreAudioOsStatus(start_status));
+        }
+        stream.running = true;
+        Ok(stream)
+    }
+}
+
+impl Drop for PcmPlatformStream {
+    fn drop(&mut self) {
+        if self.running {
+            // Safety: this procedure ID belongs to this device.
+            let _ = unsafe { (self.stop)(self.device_id, self.procedure_id) };
+            self.running = false;
+        }
+        if !self.procedure_id.is_null() {
+            // Safety: the stopped IOProc can no longer access the boxed context.
+            let _ = unsafe { (self.destroy)(self.device_id, self.procedure_id) };
+            self.procedure_id = ptr::null_mut();
+        }
+    }
+}
+
+pub(crate) fn resolve_pcm_device(
+    config: &PcmStreamConfig,
+    direction: PcmStreamDirection,
+) -> Result<PcmDevice, PcmStreamError> {
+    let mut matches = list_devices()?
+        .into_iter()
+        .filter(|device| device.uid == config.device_uid)
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return Err(PcmStreamError::DeviceNotFound {
+            uid: config.device_uid.clone(),
+        });
+    }
+    if matches.len() != 1 {
+        return Err(PcmStreamError::AmbiguousDevice {
+            uid: config.device_uid.clone(),
+            matches: matches.len(),
+        });
+    }
+    let device = matches.pop().expect("one UID match was validated");
+    let (channels, scope) = match direction {
+        PcmStreamDirection::Input => (device.input_channels, SCOPE_INPUT),
+        PcmStreamDirection::Output => (device.output_channels, SCOPE_OUTPUT),
+    };
+    if channels == 0 {
+        return Err(PcmStreamError::WrongDirection {
+            uid: config.device_uid.clone(),
+            required: direction,
+        });
+    }
+    let actual = crate::PcmFormat {
+        sample_rate: device.sample_rate,
+        channels,
+    };
+    if actual != config.client_format {
+        return Err(PcmStreamError::FormatMismatch {
+            expected: config.client_format,
+            actual,
+        });
+    }
+    validate_f32_stream_format(&device, scope)?;
+    Ok(PcmDevice {
+        object_id: device.object_id,
+        sample_rate: device.sample_rate,
+    })
+}
+
+fn validate_f32_stream_format(device: &AudioDevice, scope: u32) -> Result<(), PcmStreamError> {
+    let stream_ids = get_u32_array(device.object_id, DEVICE_STREAMS, scope)?;
+    let mut total_channels = 0_u32;
+    for stream_id in stream_ids {
+        let property = get_property_bytes(stream_id, STREAM_VIRTUAL_FORMAT, SCOPE_GLOBAL)?;
+        if property.len() != size_of::<AudioStreamBasicDescription>() {
+            return Err(PcmStreamError::UnsupportedDevicePcmFormat {
+                uid: device.uid.clone(),
+            });
+        }
+        // Safety: the exact byte size was checked; read_unaligned handles Vec<u8> alignment.
+        let format =
+            unsafe { ptr::read_unaligned(property.as_ptr().cast::<AudioStreamBasicDescription>()) };
+        let non_interleaved = format.format_flags & FORMAT_FLAG_IS_NON_INTERLEAVED != 0;
+        let expected_bytes_per_frame = if non_interleaved {
+            size_of::<f32>() as u32
+        } else {
+            format
+                .channels_per_frame
+                .checked_mul(size_of::<f32>() as u32)
+                .ok_or_else(|| PcmStreamError::UnsupportedDevicePcmFormat {
+                    uid: device.uid.clone(),
+                })?
+        };
+        let valid = format.sample_rate.round() as u32 == device.sample_rate
+            && format.format_id == FORMAT_LINEAR_PCM
+            && format.format_flags & FORMAT_FLAG_IS_FLOAT != 0
+            && format.format_flags & FORMAT_FLAG_IS_PACKED != 0
+            && format.format_flags & FORMAT_FLAG_IS_BIG_ENDIAN == 0
+            && format.frames_per_packet == 1
+            && format.bytes_per_frame == expected_bytes_per_frame
+            && format.bytes_per_packet == expected_bytes_per_frame
+            && format.bits_per_channel == 32
+            && format.channels_per_frame > 0;
+        if !valid {
+            return Err(PcmStreamError::UnsupportedDevicePcmFormat {
+                uid: device.uid.clone(),
+            });
+        }
+        total_channels = total_channels
+            .checked_add(format.channels_per_frame)
+            .ok_or_else(|| PcmStreamError::UnsupportedDevicePcmFormat {
+                uid: device.uid.clone(),
+            })?;
+    }
+    let expected_channels = if scope == SCOPE_INPUT {
+        device.input_channels
+    } else {
+        device.output_channels
+    };
+    if total_channels != expected_channels {
+        return Err(PcmStreamError::UnsupportedDevicePcmFormat {
+            uid: device.uid.clone(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_routes(routes: &[AudioRoute]) -> Result<(), CoreAudioError> {
@@ -452,6 +708,96 @@ fn validate_routes(routes: &[AudioRoute]) -> Result<(), CoreAudioError> {
         }
     }
     Ok(())
+}
+
+unsafe extern "C" fn pcm_audio_device_io_proc(
+    _device_id: AudioObjectId,
+    _now: *const c_void,
+    input: *const AudioBufferListHeader,
+    _input_time: *const c_void,
+    output: *mut AudioBufferListHeader,
+    _output_time: *const c_void,
+    client_data: *mut c_void,
+) -> OsStatus {
+    if client_data.is_null() {
+        return -1;
+    }
+    // Safety: PcmPlatformStream retains this boxed context until the IOProc is destroyed.
+    let context = unsafe { &mut *client_data.cast::<PcmIoContext>() };
+    match &mut context.callback {
+        PcmCallback::Playback(callback) => {
+            callback.metrics().callback();
+            if output.is_null() {
+                callback.metrics().format_error();
+                return 0;
+            }
+            // Safety: Core Audio supplies a writable output ABL for the enabled stream.
+            unsafe { clear_audio_buffer_list(output) };
+            // Safety: Core Audio owns a valid ABL for the callback duration.
+            let Some(frames) = (unsafe { audio_buffer_list_frames(output) }) else {
+                callback.metrics().format_error();
+                return 0;
+            };
+            // Safety: the ABL pointer was supplied by Core Audio.
+            if unsafe { audio_buffer_list_channels(output) } != Some(callback.channels()) {
+                callback.metrics().format_error();
+                return 0;
+            }
+            for frame_index in 0..frames {
+                let Some(frame) = callback.next_frame() else {
+                    continue;
+                };
+                let mut valid = true;
+                for (channel, sample) in frame.iter().copied().enumerate() {
+                    // Safety: the ABL frame and channel counts were validated above.
+                    if !unsafe { add_audio_sample(output, frame_index, channel, sample) } {
+                        valid = false;
+                        break;
+                    }
+                }
+                if !valid {
+                    callback.metrics().format_error();
+                    return 0;
+                }
+            }
+        }
+        PcmCallback::Capture(callback) => {
+            callback.metrics().callback();
+            if input.is_null() {
+                callback.metrics().format_error();
+                return 0;
+            }
+            // Safety: Core Audio owns a valid input ABL for the callback duration.
+            let Some(frames) = (unsafe { audio_buffer_list_frames(input) }) else {
+                callback.metrics().format_error();
+                return 0;
+            };
+            // Safety: the ABL pointer was supplied by Core Audio.
+            if unsafe { audio_buffer_list_channels(input) } != Some(callback.channels()) {
+                callback.metrics().format_error();
+                return 0;
+            }
+            for frame_index in 0..frames {
+                if !callback.has_capacity_for_frame() {
+                    callback.metrics().overrun(1);
+                    continue;
+                }
+                for channel in 0..callback.channels() {
+                    // Safety: the ABL frame and channel counts were validated above.
+                    let Some(sample) = (unsafe { read_audio_sample(input, frame_index, channel) })
+                    else {
+                        callback.metrics().format_error();
+                        return 0;
+                    };
+                    callback.scratch_mut()[channel] = sample;
+                }
+                callback.commit_scratch_frame();
+            }
+        }
+        #[cfg(test)]
+        PcmCallback::Test => {}
+    }
+    0
 }
 
 unsafe extern "C" fn audio_device_io_proc(
@@ -561,6 +907,19 @@ unsafe fn audio_buffer_list_frames(list: *const AudioBufferListHeader) -> Option
     frames
 }
 
+unsafe fn audio_buffer_list_channels(list: *const AudioBufferListHeader) -> Option<usize> {
+    // Safety: caller guarantees Core Audio supplied a valid list pointer.
+    let number_buffers = unsafe { (*list).number_buffers as usize };
+    let first = unsafe { &raw const (*list).first_buffer };
+    let mut channels = 0_usize;
+    for index in 0..number_buffers {
+        // Safety: AudioBufferList contains number_buffers flexible entries.
+        let buffer = unsafe { &*first.add(index) };
+        channels = channels.checked_add(buffer.number_channels as usize)?;
+    }
+    Some(channels)
+}
+
 unsafe fn read_audio_sample(
     list: *const AudioBufferListHeader,
     frame: usize,
@@ -639,11 +998,12 @@ unsafe fn clear_audio_buffer_list(list: *mut AudioBufferListHeader) {
 }
 
 fn configure_stream_usage(
-    context: &DeviceIoContext,
+    device_id: AudioObjectId,
+    procedure_id: AudioDeviceIoProcId,
     scope: u32,
     enabled: bool,
 ) -> Result<(), CoreAudioError> {
-    let streams = get_u32_array(context.device_id, DEVICE_STREAMS, scope)?;
+    let streams = get_u32_array(device_id, DEVICE_STREAMS, scope)?;
     if streams.is_empty() {
         return Ok(());
     }
@@ -658,7 +1018,7 @@ fn configure_stream_usage(
         .cast::<AudioHardwareIoProcStreamUsageHeader>();
     // Safety: storage is suitably aligned and large enough for the flexible structure.
     unsafe {
-        (*header).io_proc = context.procedure_id;
+        (*header).io_proc = procedure_id;
         (*header).number_streams = streams.len() as u32;
         let first = &raw mut (*header).first_stream_is_on;
         for index in 0..streams.len() {
@@ -669,7 +1029,7 @@ fn configure_stream_usage(
     // Safety: storage contains a complete AudioHardwareIOProcStreamUsage value.
     status(unsafe {
         AudioObjectSetPropertyData(
-            context.device_id,
+            device_id,
             &property,
             0,
             ptr::null(),
@@ -940,5 +1300,61 @@ fn status(value: OsStatus) -> Result<(), CoreAudioError> {
         Ok(())
     } else {
         Err(CoreAudioError::OsStatus(value))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    static STOP_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C" fn fake_stop(
+        _device_id: AudioObjectId,
+        _procedure_id: AudioDeviceIoProcId,
+    ) -> OsStatus {
+        STOP_CALLS.fetch_add(1, Ordering::Relaxed);
+        0
+    }
+
+    unsafe extern "C" fn fake_destroy(
+        _device_id: AudioObjectId,
+        _procedure_id: AudioDeviceIoProcId,
+    ) -> OsStatus {
+        DESTROY_CALLS.fetch_add(1, Ordering::Relaxed);
+        0
+    }
+
+    fn fake_stream() -> PcmPlatformStream {
+        PcmPlatformStream {
+            device_id: 42,
+            procedure_id: std::ptr::NonNull::<u8>::dangling().as_ptr().cast(),
+            running: false,
+            stop: fake_stop,
+            destroy: fake_destroy,
+            _context: Box::new(PcmIoContext {
+                callback: PcmCallback::Test,
+            }),
+        }
+    }
+
+    #[test]
+    fn failed_start_rolls_back_the_created_ioproc() {
+        STOP_CALLS.store(0, Ordering::Relaxed);
+        DESTROY_CALLS.store(0, Ordering::Relaxed);
+
+        assert!(matches!(
+            PcmPlatformStream::finish_start(fake_stream(), -50),
+            Err(PcmStreamError::CoreAudioOsStatus(-50))
+        ));
+        assert_eq!(STOP_CALLS.load(Ordering::Relaxed), 0);
+        assert_eq!(DESTROY_CALLS.load(Ordering::Relaxed), 1);
+
+        let stream = PcmPlatformStream::finish_start(fake_stream(), 0).unwrap();
+        drop(stream);
+        assert_eq!(STOP_CALLS.load(Ordering::Relaxed), 1);
+        assert_eq!(DESTROY_CALLS.load(Ordering::Relaxed), 2);
     }
 }

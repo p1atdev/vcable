@@ -6,6 +6,13 @@
 use std::error::Error;
 use std::fmt;
 
+mod pcm;
+
+pub use pcm::{
+    PcmCaptureStream, PcmFormat, PcmPlaybackStream, PcmReader, PcmStreamConfig, PcmStreamDirection,
+    PcmStreamError, PcmStreamMetrics, PcmWriter,
+};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AudioDevice {
     pub object_id: u32,
