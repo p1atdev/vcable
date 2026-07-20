@@ -46,6 +46,7 @@ const UTF8_ENCODING: u32 = 0x0800_0100;
 const BAD_OBJECT_STATUS: OsStatus = 560_947_818;
 const DEVICE_CHANGE_TIMEOUT: Duration = Duration::from_secs(5);
 const DEVICE_CHANGE_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const UNKNOWN_PROPERTY_STATUS: OsStatus = fourcc(*b"who?") as OsStatus;
 
 const fn fourcc(value: [u8; 4]) -> u32 {
     u32::from_be_bytes(value)
@@ -459,6 +460,17 @@ pub(crate) struct PcmPlatformStream {
     // The box owns the stable client-data pointer until the IOProc is destroyed.
     _context: Box<PcmIoContext>,
 }
+
+// Safety: the IOProc client-data points into `_context`, whose `Box` allocation does not move when
+// this stream value moves. The callback reaches only that boxed context and never any field of the
+// `PcmPlatformStream` value itself. Drop first stops the IOProc, then destroys its ID, and only then
+// allows `_context` to be freed by field drop. Apple's AudioHardware.h contracts for
+// AudioDeviceStop and AudioDeviceDestroyIOProcID identify the operation solely by the process-wide
+// AudioObjectID and AudioDeviceIOProcID and specify no creating-thread, main-thread, or run-loop
+// affinity; the sole owner may therefore perform those operations from a different non-real-time
+// thread. `Sync` is intentionally not implemented, so lifecycle operations cannot be invoked
+// concurrently through shared references.
+unsafe impl Send for PcmPlatformStream {}
 
 impl PcmPlatformStream {
     pub(crate) fn start_playback(
@@ -1095,9 +1107,10 @@ fn wait_for_device_visibility(uid: &str, expected_present: bool) -> Result<(), C
                     return Ok(());
                 }
             }
-            // The HAL can retire an object between fetching the device ID list and reading
-            // that object's properties. Retry only this documented transition condition.
-            Err(CoreAudioError::OsStatus(BAD_OBJECT_STATUS)) => {}
+            // The HAL can retire an object between fetching the device ID list and reading that
+            // object's properties. It reports either BadObject from the property access or
+            // UnknownProperty when its preceding HasProperty check observes the retired object.
+            Err(CoreAudioError::OsStatus(BAD_OBJECT_STATUS | UNKNOWN_PROPERTY_STATUS)) => {}
             Err(error) => return Err(error),
         }
         if Instant::now() >= deadline {
@@ -1306,10 +1319,12 @@ fn status(value: OsStatus) -> Result<(), CoreAudioError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use std::sync::atomic::AtomicUsize;
 
     static STOP_CALLS: AtomicUsize = AtomicUsize::new(0);
     static DESTROY_CALLS: AtomicUsize = AtomicUsize::new(0);
+    static LIFECYCLE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     unsafe extern "C" fn fake_stop(
         _device_id: AudioObjectId,
@@ -1342,6 +1357,7 @@ mod tests {
 
     #[test]
     fn failed_start_rolls_back_the_created_ioproc() {
+        let _guard = LIFECYCLE_TEST_LOCK.lock().unwrap();
         STOP_CALLS.store(0, Ordering::Relaxed);
         DESTROY_CALLS.store(0, Ordering::Relaxed);
 
@@ -1351,10 +1367,16 @@ mod tests {
         ));
         assert_eq!(STOP_CALLS.load(Ordering::Relaxed), 0);
         assert_eq!(DESTROY_CALLS.load(Ordering::Relaxed), 1);
+    }
 
+    #[test]
+    fn started_stream_stops_and_destroys_once_when_dropped_on_another_thread() {
+        let _guard = LIFECYCLE_TEST_LOCK.lock().unwrap();
+        STOP_CALLS.store(0, Ordering::Relaxed);
+        DESTROY_CALLS.store(0, Ordering::Relaxed);
         let stream = PcmPlatformStream::finish_start(fake_stream(), 0).unwrap();
-        drop(stream);
+        std::thread::spawn(move || drop(stream)).join().unwrap();
         assert_eq!(STOP_CALLS.load(Ordering::Relaxed), 1);
-        assert_eq!(DESTROY_CALLS.load(Ordering::Relaxed), 2);
+        assert_eq!(DESTROY_CALLS.load(Ordering::Relaxed), 1);
     }
 }

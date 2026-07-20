@@ -18,6 +18,10 @@ pub struct PcmStreamConfig {
     pub device_uid: String,
     pub client_format: PcmFormat,
     pub capacity_frames: usize,
+    /// Desired total buffered frames, including the resampler's `current` and `next` frames.
+    ///
+    /// Playback and capture wait for `max(target_fill_frames, 2)` total buffered frames before
+    /// initially transferring PCM and after recovering from an underrun.
     pub target_fill_frames: usize,
     pub max_drift_ppm: u32,
 }
@@ -144,7 +148,8 @@ impl From<CoreAudioError> for PcmStreamError {
 /// An atomic point-in-time snapshot of a PCM stream.
 ///
 /// `transferred_frames` counts non-silent playback frames delivered to Core Audio or capture
-/// frames accepted from Core Audio. The ring fill excludes the resampler's two lookahead frames.
+/// frames accepted from Core Audio. `ring_fill_frames` counts only frames still in the ring and
+/// excludes the resampler's `current` and `next` frames.
 pub struct PcmStreamMetrics {
     pub callbacks: u64,
     pub transferred_frames: u64,
@@ -284,6 +289,7 @@ struct RingResampler {
     consumer: Consumer,
     channels: usize,
     target_fill_frames: usize,
+    priming_threshold_frames: usize,
     control_span_frames: usize,
     nominal_step: f64,
     max_drift_ratio: f64,
@@ -293,6 +299,8 @@ struct RingResampler {
     phase: f64,
     have_current: bool,
     have_next: bool,
+    primed: bool,
+    has_primed: bool,
     metrics: Arc<AtomicPcmStreamMetrics>,
 }
 
@@ -310,6 +318,7 @@ impl RingResampler {
             consumer,
             channels,
             target_fill_frames,
+            priming_threshold_frames: target_fill_frames.max(2),
             control_span_frames: target_fill_frames.min(capacity_frames - target_fill_frames),
             nominal_step,
             max_drift_ratio: f64::from(max_drift_ppm) / 1_000_000.0,
@@ -319,8 +328,25 @@ impl RingResampler {
             phase: 0.0,
             have_current: false,
             have_next: false,
+            primed: false,
+            has_primed: false,
             metrics,
         }
+    }
+
+    fn buffered_frames(&self) -> usize {
+        self.consumer.available() / self.channels
+            + usize::from(self.have_current)
+            + usize::from(self.have_next)
+    }
+
+    fn drift_correction(&self) -> f64 {
+        drift_correction(
+            self.buffered_frames(),
+            self.target_fill_frames,
+            self.control_span_frames,
+            self.max_drift_ratio,
+        )
     }
 
     fn pop_frame(&mut self, next: bool) -> bool {
@@ -339,15 +365,25 @@ impl RingResampler {
     }
 
     fn prepare_next_frame(&mut self) -> bool {
+        if !self.primed {
+            if self.buffered_frames() < self.priming_threshold_frames {
+                return false;
+            }
+            self.primed = true;
+            self.has_primed = true;
+        }
+
         if !self.have_current {
             self.have_current = self.pop_frame(false);
             if !self.have_current {
+                self.primed = false;
                 return false;
             }
         }
         if !self.have_next {
             self.have_next = self.pop_frame(true);
             if !self.have_next {
+                self.primed = false;
                 return false;
             }
         }
@@ -358,12 +394,7 @@ impl RingResampler {
                 self.current[channel] + (self.next[channel] - self.current[channel]) * phase;
         }
 
-        let correction = drift_correction(
-            self.consumer.available() / self.channels,
-            self.target_fill_frames,
-            self.control_span_frames,
-            self.max_drift_ratio,
-        );
+        let correction = self.drift_correction();
         self.phase += self.nominal_step * (1.0 + correction);
         while self.phase >= 1.0 && self.have_next {
             self.current.copy_from_slice(&self.next);
@@ -371,6 +402,9 @@ impl RingResampler {
             self.have_next = false;
             self.phase -= 1.0;
             self.have_next = self.pop_frame(true);
+        }
+        if !self.have_next {
+            self.primed = false;
         }
         true
     }
@@ -401,6 +435,10 @@ pub struct PcmReader {
 
 impl PcmReader {
     /// Reads as many complete interleaved frames as are currently available without blocking.
+    ///
+    /// While the stream is initially priming or re-priming, this returns `0` without consuming
+    /// buffered PCM. If an already-primed stream runs out partway through this call, the frames
+    /// produced before the underrun are returned and re-priming begins with the next call.
     pub fn try_read_interleaved(&mut self, pcm: &mut [f32]) -> Result<usize, PcmStreamError> {
         self.resampler.metrics.ensure_open()?;
         if !pcm.len().is_multiple_of(self.resampler.channels) {
@@ -458,11 +496,14 @@ impl PlaybackCallbackState {
     }
 
     pub(crate) fn next_frame(&mut self) -> Option<&[f32]> {
+        let count_as_underrun = self.resampler.has_primed;
         if self.resampler.prepare_next_frame() {
             self.resampler.metrics.transferred(1);
             Some(&self.resampler.interpolated)
         } else {
-            self.resampler.metrics.underrun(1);
+            if count_as_underrun {
+                self.resampler.metrics.underrun(1);
+            }
             None
         }
     }
@@ -530,7 +571,10 @@ impl CaptureCallbackState {
     }
 }
 
-/// An active process-to-Core-Audio-output stream.
+/// An active process-to-Core-Audio-output stream that can be moved between threads.
+///
+/// On a VCable device, PCM written through the associated [`PcmWriter`] is played into the
+/// device's output side and becomes available from the device's looped-back input side.
 pub struct PcmPlaybackStream {
     metrics: Arc<AtomicPcmStreamMetrics>,
     #[cfg(target_os = "macos")]
@@ -589,7 +633,10 @@ impl Drop for PcmPlaybackStream {
     }
 }
 
-/// An active Core-Audio-input-to-process stream.
+/// An active Core-Audio-input-to-process stream that can be moved between threads.
+///
+/// On a VCable device, the associated [`PcmReader`] captures PCM from the input side, including
+/// PCM looped back from a [`PcmPlaybackStream`] using the same device.
 pub struct PcmCaptureStream {
     metrics: Arc<AtomicPcmStreamMetrics>,
     #[cfg(target_os = "macos")]
@@ -796,11 +843,18 @@ mod tests {
     }
 
     #[test]
-    fn capture_empty_ring_returns_zero_frames() {
-        let (_, mut reader, _) = capture_harness(&config(8, 4));
-        let mut output = [9.0; 8];
+    fn capture_waits_for_target_without_consuming_then_preserves_order() {
+        let (mut callback, mut reader, metrics) = capture_harness(&config(8, 4));
+        callback.capture_interleaved(&[1.0, 10.0, 2.0, 20.0, 3.0, 30.0]);
+
+        let mut output = [9.0; 4];
         assert_eq!(reader.try_read_interleaved(&mut output).unwrap(), 0);
-        assert_eq!(output, [9.0; 8]);
+        assert_eq!(output, [9.0; 4]);
+        assert_eq!(metrics.snapshot().ring_fill_frames, 3);
+
+        callback.capture_interleaved(&[4.0, 40.0]);
+        assert_eq!(reader.try_read_interleaved(&mut output).unwrap(), 2);
+        assert_eq!(output, [1.0, 10.0, 2.0, 20.0]);
     }
 
     #[test]
@@ -814,29 +868,92 @@ mod tests {
     }
 
     #[test]
-    fn playback_underrun_leaves_zero_filled_frames() {
-        let (_, mut callback, metrics) = playback_harness(&config(8, 4));
-        let mut output = [0.0; 8];
-        for frame in output.chunks_exact_mut(2) {
-            if let Some(source) = callback.next_frame() {
-                frame.copy_from_slice(source);
-            }
-        }
-        assert_eq!(output, [0.0; 8]);
-        assert_eq!(metrics.snapshot().underrun_frames, 4);
-    }
-
-    #[test]
-    fn playback_preserves_channel_order_and_metrics() {
+    fn playback_waits_for_target_without_consuming_or_counting_underruns() {
         let (mut writer, mut callback, metrics) = playback_harness(&config(8, 4));
         writer
             .try_write_interleaved(&[1.0, 10.0, 2.0, 20.0, 3.0, 30.0])
             .unwrap();
+
+        assert!(callback.next_frame().is_none());
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.transferred_frames, 0);
+        assert_eq!(snapshot.underrun_frames, 0);
+        assert_eq!(snapshot.ring_fill_frames, 3);
+
+        writer.try_write_interleaved(&[4.0, 40.0]).unwrap();
         assert_eq!(callback.next_frame().unwrap(), [1.0, 10.0]);
         let snapshot = metrics.snapshot();
         assert_eq!(snapshot.transferred_frames, 1);
+        assert_eq!(snapshot.underrun_frames, 0);
         assert_eq!(snapshot.ring_fill_frames, 1);
         assert_eq!(snapshot.ring_capacity_frames, 8);
+    }
+
+    #[test]
+    fn priming_requires_two_frames_when_target_is_one() {
+        let (mut writer, mut callback, metrics) = playback_harness(&config(4, 1));
+        writer.try_write_interleaved(&[1.0, 10.0]).unwrap();
+        assert!(callback.next_frame().is_none());
+        assert_eq!(metrics.snapshot().ring_fill_frames, 1);
+
+        writer.try_write_interleaved(&[2.0, 20.0]).unwrap();
+        assert_eq!(callback.next_frame().unwrap(), [1.0, 10.0]);
+    }
+
+    #[test]
+    fn playback_reprimes_without_consuming_partial_fill_and_preserves_order() {
+        let mut test_config = config(8, 4);
+        test_config.max_drift_ppm = 0;
+        let (mut writer, mut callback, metrics) = playback_harness(&test_config);
+        writer
+            .try_write_interleaved(&[1.0, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0])
+            .unwrap();
+        for expected in [[1.0, 10.0], [2.0, 20.0], [3.0, 30.0]] {
+            assert_eq!(callback.next_frame().unwrap(), expected);
+        }
+        assert!(!callback.resampler.primed);
+
+        assert!(callback.next_frame().is_none());
+        assert_eq!(metrics.snapshot().underrun_frames, 1);
+
+        writer
+            .try_write_interleaved(&[5.0, 50.0, 6.0, 60.0])
+            .unwrap();
+        assert!(callback.next_frame().is_none());
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.ring_fill_frames, 2);
+        assert_eq!(snapshot.underrun_frames, 2);
+
+        writer.try_write_interleaved(&[7.0, 70.0]).unwrap();
+        for expected in [[4.0, 40.0], [5.0, 50.0], [6.0, 60.0]] {
+            assert_eq!(callback.next_frame().unwrap(), expected);
+        }
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.transferred_frames, 6);
+        assert_eq!(snapshot.underrun_frames, 2);
+    }
+
+    #[test]
+    fn capture_returns_partial_read_then_reprimes_without_consuming_partial_fill() {
+        let mut test_config = config(8, 4);
+        test_config.max_drift_ppm = 0;
+        let (mut callback, mut reader, metrics) = capture_harness(&test_config);
+        callback.capture_interleaved(&[1.0, 10.0, 2.0, 20.0, 3.0, 30.0, 4.0, 40.0]);
+
+        let mut initial = [9.0; 8];
+        assert_eq!(reader.try_read_interleaved(&mut initial).unwrap(), 3);
+        assert_eq!(&initial[..6], &[1.0, 10.0, 2.0, 20.0, 3.0, 30.0]);
+        assert!(!reader.resampler.primed);
+
+        callback.capture_interleaved(&[5.0, 50.0, 6.0, 60.0]);
+        let mut output = [9.0; 6];
+        assert_eq!(reader.try_read_interleaved(&mut output).unwrap(), 0);
+        assert_eq!(output, [9.0; 6]);
+        assert_eq!(metrics.snapshot().ring_fill_frames, 2);
+
+        callback.capture_interleaved(&[7.0, 70.0]);
+        assert_eq!(reader.try_read_interleaved(&mut output).unwrap(), 3);
+        assert_eq!(output, [4.0, 40.0, 5.0, 50.0, 6.0, 60.0]);
     }
 
     #[test]
@@ -846,6 +963,33 @@ mod tests {
         assert!((drift_correction(0, 960, 960, max) + max).abs() < f64::EPSILON);
         assert!((drift_correction(1_920, 960, 960, max) - max).abs() < f64::EPSILON);
         assert!((drift_correction(8_192, 960, 960, max) - max).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn drift_control_uses_ring_and_cached_frames_as_total_fill() {
+        let test_config = config(8, 4);
+        let validated = validate_config(&test_config).unwrap();
+        let metrics = Arc::new(AtomicPcmStreamMetrics::new(test_config.capacity_frames));
+        let (mut producer, consumer) = create_ring(validated.internal_sample_capacity).unwrap();
+        let mut resampler = RingResampler::new(
+            consumer,
+            2,
+            test_config.target_fill_frames,
+            test_config.capacity_frames,
+            0.0,
+            test_config.max_drift_ppm,
+            Arc::clone(&metrics),
+        );
+        for _ in 0..test_config.target_fill_frames {
+            assert_eq!(producer.push_slice(&[0.25, -0.25]), 2);
+            metrics.add_fill(1);
+        }
+
+        assert_eq!(resampler.drift_correction(), 0.0);
+        assert!(resampler.next_frame().is_some());
+        assert_eq!(metrics.snapshot().ring_fill_frames, 2);
+        assert_eq!(resampler.buffered_frames(), 4);
+        assert_eq!(resampler.drift_correction(), 0.0);
     }
 
     #[test]
@@ -903,9 +1047,11 @@ mod tests {
     }
 
     #[test]
-    fn reader_and_writer_are_send_and_not_clone_by_construction() {
+    fn pcm_handles_are_send() {
         fn assert_send<T: Send>() {}
         assert_send::<PcmReader>();
         assert_send::<PcmWriter>();
+        assert_send::<PcmPlaybackStream>();
+        assert_send::<PcmCaptureStream>();
     }
 }
