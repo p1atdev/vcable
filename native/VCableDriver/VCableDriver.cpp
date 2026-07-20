@@ -28,6 +28,7 @@ constexpr UInt32 kRingFrames = 65536;
 constexpr UInt32 kZeroTimeStampPeriod = 16384;
 constexpr UInt32 kLoopbackLatencyFrames = 512;
 constexpr UInt32 kBufferFrameSize = 512;
+constexpr UInt64 kDeleteDeviceConfigurationAction = 1;
 constexpr AudioObjectPropertySelector kVCableControlProperty = 'vctl';
 constexpr AudioObjectPropertySelector kVCableStatusProperty = 'vsta';
 constexpr const char* kStorageKey = "devices-v1";
@@ -146,6 +147,7 @@ struct Device {
     std::unique_ptr<std::atomic<UInt32>[]> samples;
     std::unique_ptr<std::atomic<UInt64>[]> tags;
     std::atomic<bool> active{true};
+    std::atomic<bool> deletePending{false};
     std::atomic<UInt32> attachedClients{0};
     std::atomic<UInt32> runningClients{0};
     std::atomic<bool> inputActive{true};
@@ -1190,19 +1192,39 @@ OSStatus RemoveDeviceClient(AudioServerPlugInDriverRef driver, AudioObjectID obj
 }
 
 OSStatus PerformDeviceConfigurationChange(AudioServerPlugInDriverRef driver,
-                                           AudioObjectID objectID, UInt64, void*) {
+                                           AudioObjectID objectID, UInt64 action,
+                                           void* changeInfo) {
     Device* device = DeviceForObject(objectID);
-    return IsDriver(driver) && device != nullptr
-        ? static_cast<OSStatus>(noErr)
-        : static_cast<OSStatus>(kAudioHardwareBadObjectError);
+    if (!IsDriver(driver) || device == nullptr || objectID != device->DeviceObjectID() ||
+        action != kDeleteDeviceConfigurationAction || changeInfo != device) {
+        return kAudioHardwareBadObjectError;
+    }
+    OSStatus status = noErr;
+    {
+        std::lock_guard lock(gStateMutex);
+        if (!device->deletePending.exchange(false, std::memory_order_acq_rel)) {
+            return kAudioHardwareIllegalOperationError;
+        }
+        status = RemoveDeviceLocked(device, true);
+    }
+    if (status == noErr) {
+        NotifyDeviceListChanged();
+        std::lock_guard lock(gStateMutex);
+        ReleaseRetiredSlotLocked(device);
+    }
+    return status;
 }
 
 OSStatus AbortDeviceConfigurationChange(AudioServerPlugInDriverRef driver,
-                                         AudioObjectID objectID, UInt64, void*) {
+                                         AudioObjectID objectID, UInt64 action,
+                                         void* changeInfo) {
     Device* device = DeviceForObject(objectID);
-    return IsDriver(driver) && device != nullptr
-        ? static_cast<OSStatus>(noErr)
-        : static_cast<OSStatus>(kAudioHardwareBadObjectError);
+    if (!IsDriver(driver) || device == nullptr || objectID != device->DeviceObjectID() ||
+        action != kDeleteDeviceConfigurationAction || changeInfo != device) {
+        return kAudioHardwareBadObjectError;
+    }
+    device->deletePending.store(false, std::memory_order_release);
+    return noErr;
 }
 
 Boolean HasProperty(AudioServerPlugInDriverRef driver, AudioObjectID objectID, pid_t,
@@ -1295,28 +1317,40 @@ OSStatus SetPropertyData(AudioServerPlugInDriverRef driver, AudioObjectID object
             return kAudioHardwareIllegalOperationError;
         }
         const std::vector<std::string> fields = Split(command, '\t');
-        bool changed = false;
-        Device* removedDevice = nullptr;
+        bool created = false;
+        Device* deleteDevice = nullptr;
         OSStatus status = noErr;
         {
             std::lock_guard lock(gStateMutex);
             if (!fields.empty() && fields[0] == "create") {
                 Device* existing = fields.size() > 1 ? FindByIDLocked(fields[1]) : nullptr;
                 status = AddDeviceLocked(fields, true, nullptr);
-                changed = status == noErr && existing == nullptr;
+                created = status == noErr && existing == nullptr;
             } else if (fields.size() == 2 && fields[0] == "delete") {
-                removedDevice = FindByIDLocked(fields[1]);
-                status = RemoveDeviceLocked(removedDevice, true);
-                changed = status == noErr;
+                deleteDevice = FindByIDLocked(fields[1]);
+                if (deleteDevice == nullptr) {
+                    status = kAudioHardwareBadObjectError;
+                } else if (deleteDevice->runningClients.load(std::memory_order_acquire) != 0 ||
+                           deleteDevice->deletePending.exchange(true,
+                                                                std::memory_order_acq_rel)) {
+                    status = kAudioHardwareIllegalOperationError;
+                }
             } else {
                 status = kAudioHardwareIllegalOperationError;
             }
         }
-        if (changed) {
+        if (created) {
             NotifyDeviceListChanged();
-            if (removedDevice != nullptr) {
-                std::lock_guard lock(gStateMutex);
-                ReleaseRetiredSlotLocked(removedDevice);
+        } else if (status == noErr && deleteDevice != nullptr) {
+            if (gHost == nullptr || gHost->RequestDeviceConfigurationChange == nullptr) {
+                deleteDevice->deletePending.store(false, std::memory_order_release);
+                return kAudioHardwareNotReadyError;
+            }
+            status = gHost->RequestDeviceConfigurationChange(
+                gHost, deleteDevice->DeviceObjectID(), kDeleteDeviceConfigurationAction,
+                deleteDevice);
+            if (status != noErr) {
+                deleteDevice->deletePending.store(false, std::memory_order_release);
             }
         }
         return status;

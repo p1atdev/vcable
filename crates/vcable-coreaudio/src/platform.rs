@@ -4,6 +4,8 @@ use std::ffi::{c_char, c_void};
 use std::ptr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
 use vcable_core::{Consumer, Producer, spsc_ring_buffer};
 
 type AudioObjectId = u32;
@@ -31,6 +33,9 @@ const VCABLE_BUNDLE_ID: &str = "dev.vcable.driver";
 const VCABLE_UID_PREFIX: &str = "dev.vcable.device.";
 const TRANSPORT_TYPE_VIRTUAL: u32 = fourcc(*b"virt");
 const UTF8_ENCODING: u32 = 0x0800_0100;
+const BAD_OBJECT_STATUS: OsStatus = 560_947_818;
+const DEVICE_CHANGE_TIMEOUT: Duration = Duration::from_secs(5);
+const DEVICE_CHANGE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 const fn fourcc(value: [u8; 4]) -> u32 {
     u32::from_be_bytes(value)
@@ -710,12 +715,39 @@ pub fn create_virtual_device(
     }
     let command =
         format!("create\t{id}\t{name}\t{input_channels}\t{output_channels}\t{sample_rate}");
-    send_driver_command(&command)
+    send_driver_command(&command)?;
+    wait_for_device_visibility(&format!("{VCABLE_UID_PREFIX}{id}"), true)
 }
 
 pub fn delete_virtual_device(id: &str) -> Result<(), CoreAudioError> {
     validate_field(id, "device id")?;
-    send_driver_command(&format!("delete\t{id}"))
+    send_driver_command(&format!("delete\t{id}"))?;
+    wait_for_device_visibility(&format!("{VCABLE_UID_PREFIX}{id}"), false)
+}
+
+fn wait_for_device_visibility(uid: &str, expected_present: bool) -> Result<(), CoreAudioError> {
+    let deadline = Instant::now() + DEVICE_CHANGE_TIMEOUT;
+    loop {
+        match list_devices() {
+            Ok(devices) => {
+                let present = devices.iter().any(|device| device.uid == uid);
+                if present == expected_present {
+                    return Ok(());
+                }
+            }
+            // The HAL can retire an object between fetching the device ID list and reading
+            // that object's properties. Retry only this documented transition condition.
+            Err(CoreAudioError::OsStatus(BAD_OBJECT_STATUS)) => {}
+            Err(error) => return Err(error),
+        }
+        if Instant::now() >= deadline {
+            return Err(CoreAudioError::DeviceChangeTimeout {
+                uid: uid.to_owned(),
+                expected_present,
+            });
+        }
+        thread::sleep(DEVICE_CHANGE_POLL_INTERVAL);
+    }
 }
 
 fn validate_field(value: &str, name: &'static str) -> Result<(), CoreAudioError> {

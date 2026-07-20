@@ -147,6 +147,8 @@ target/debug/vcablectl --socket "$VCABLE_SOCKET" delete chat
 
 I/O実行中、またはルートから参照中のデバイスは削除できません。Core Audioによる受動的なクライアント登録だけでは削除を妨げません。
 
+デバイス削除はHALホストへ構成変更を要求し、`PerformDeviceConfigurationChange`で許可された後に実行します。作成・削除コマンドはCore Audioのデバイス一覧へ結果が反映されるまで最大5秒待機し、反映されなければタイムアウトを明示的に返します。
+
 ## ルート管理
 
 最初に`status`でエンドポイントIDを確認します。

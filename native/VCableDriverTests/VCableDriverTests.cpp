@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -15,6 +16,11 @@ constexpr AudioObjectPropertySelector kVCableControlProperty = 'vctl';
 
 CFPropertyListRef gStoredValue = nullptr;
 UInt32 gNotifications = 0;
+UInt32 gConfigurationRequests = 0;
+AudioServerPlugInDriverRef gDriver = nullptr;
+AudioObjectID gPendingDevice = kAudioObjectUnknown;
+UInt64 gPendingAction = 0;
+void* gPendingChangeInfo = nullptr;
 
 OSStatus PropertiesChanged(AudioServerPlugInHostRef, AudioObjectID, UInt32 count,
                            const AudioObjectPropertyAddress*) {
@@ -53,8 +59,15 @@ OSStatus DeleteFromStorage(AudioServerPlugInHostRef, CFStringRef) {
     return noErr;
 }
 
-OSStatus RequestDeviceConfigurationChange(AudioServerPlugInHostRef, AudioObjectID, UInt64,
-                                          void*) {
+OSStatus RequestDeviceConfigurationChange(AudioServerPlugInHostRef, AudioObjectID device,
+                                          UInt64 action, void* changeInfo) {
+    ++gConfigurationRequests;
+    if (gDriver == nullptr || gPendingDevice != kAudioObjectUnknown) {
+        return kAudioHardwareNotReadyError;
+    }
+    gPendingDevice = device;
+    gPendingAction = action;
+    gPendingChangeInfo = changeInfo;
     return noErr;
 }
 
@@ -76,6 +89,22 @@ bool CheckStatus(OSStatus status, const char* operation) {
                  static_cast<char>((static_cast<UInt32>(status) >> 8) & 0xff),
                  static_cast<char>(static_cast<UInt32>(status) & 0xff));
     return false;
+}
+
+bool PerformPendingConfigurationChange() {
+    if (gDriver == nullptr || gPendingDevice == kAudioObjectUnknown) {
+        std::fprintf(stderr, "no pending configuration change\n");
+        return false;
+    }
+    const AudioObjectID device = gPendingDevice;
+    const UInt64 action = gPendingAction;
+    void* const changeInfo = gPendingChangeInfo;
+    gPendingDevice = kAudioObjectUnknown;
+    gPendingAction = 0;
+    gPendingChangeInfo = nullptr;
+    return CheckStatus((*gDriver)->PerformDeviceConfigurationChange(
+                           gDriver, device, action, changeInfo),
+                       "PerformDeviceConfigurationChange");
 }
 
 template <typename T>
@@ -110,7 +139,12 @@ OSStatus SetControlStatus(AudioServerPlugInDriverRef driver, const char* command
 bool SetControl(AudioServerPlugInDriverRef driver, const char* command,
                 pid_t clientProcessID = 0) {
     const OSStatus status = SetControlStatus(driver, command, clientProcessID);
-    return CheckStatus(status, "SetPropertyData(vctl)");
+    if (!CheckStatus(status, "SetPropertyData(vctl)")) {
+        return false;
+    }
+    return std::string_view(command).starts_with("delete\t")
+        ? PerformPendingConfigurationChange()
+        : true;
 }
 
 bool GetDeviceList(AudioServerPlugInDriverRef driver, AudioObjectID& device) {
@@ -258,12 +292,16 @@ bool VerifyDeletionGuards(AudioServerPlugInDriverRef driver) {
     const bool stopped =
         CheckStatus((*driver)->StopIO(driver, device, client.mClientID),
                     "StopIO(guarded)");
-    const bool acceptsAttachedClient = SetControl(driver, "delete\tguarded", 2002);
+    const bool acceptsDeleteRequest =
+        SetControlStatus(driver, "delete\tguarded", 2002) == noErr;
+    const bool remainsUntilHostApproval = GetDeviceCount(driver, 1);
+    const bool acceptsAttachedClient = PerformPendingConfigurationChange();
     const bool detached = CheckStatus(
         (*driver)->RemoveDeviceClient(driver, device, &client),
         "RemoveDeviceClient(guarded)");
-    return started && rejectsRunningClient && stopped && acceptsAttachedClient &&
-           detached && GetDeviceCount(driver, 0);
+    return started && rejectsRunningClient && stopped && acceptsDeleteRequest &&
+           remainsUntilHostApproval && acceptsAttachedClient && detached &&
+           GetDeviceCount(driver, 0);
 }
 
 }  // namespace
@@ -287,6 +325,7 @@ int main(int argc, char** argv) {
     }
     auto driver = static_cast<AudioServerPlugInDriverRef>(
         factory(kCFAllocatorDefault, kAudioServerPlugInTypeUUID));
+    gDriver = driver;
     gStoredValue = CFStringCreateWithCString(
         kCFAllocatorDefault, "create\tpersisted\tVCable Persisted\t2\t2\t48000\n",
         kCFStringEncodingUTF8);
@@ -318,8 +357,14 @@ int main(int argc, char** argv) {
         gStoredValue = nullptr;
     }
     (*driver)->Release(driver);
+    gDriver = nullptr;
     dlclose(bundle);
     if (!passed) {
+        return 1;
+    }
+    if (gConfigurationRequests != 5 || gPendingDevice != kAudioObjectUnknown) {
+        std::fprintf(stderr, "expected 5 configuration requests, got %u\n",
+                     gConfigurationRequests);
         return 1;
     }
     std::puts("VCableDriver integration test passed");

@@ -38,6 +38,7 @@ pub enum CoreAudioError {
     InvalidUtf8,
     DriverNotInstalled,
     DriverRejected(String),
+    DeviceChangeTimeout { uid: String, expected_present: bool },
     InvalidRoute(String),
 }
 
@@ -52,6 +53,18 @@ impl fmt::Display for CoreAudioError {
             Self::DriverRejected(message) => {
                 write!(f, "VCable driver rejected the request: {message}")
             }
+            Self::DeviceChangeTimeout {
+                uid,
+                expected_present,
+            } => write!(
+                f,
+                "timed out waiting for Core Audio device {uid} to become {}",
+                if *expected_present {
+                    "visible"
+                } else {
+                    "absent"
+                }
+            ),
             Self::InvalidRoute(message) => write!(f, "invalid audio route: {message}"),
         }
     }
