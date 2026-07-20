@@ -1,0 +1,374 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		100000000000000000000001 /* VCableDriver.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000002 /* VCableDriver.cpp */; };
+		100000000000000000000020 /* VCableDriverTests.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 100000000000000000000021 /* VCableDriverTests.cpp */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		10000000000000000000002A /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 10000000000000000000000C /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 100000000000000000000008;
+			remoteInfo = VCableDriver;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		100000000000000000000002 /* VCableDriver.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = VCableDriver.cpp; sourceTree = "<group>"; };
+		100000000000000000000003 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		100000000000000000000004 /* VCableDriver.driver */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = VCableDriver.driver; sourceTree = BUILT_PRODUCTS_DIR; };
+		100000000000000000000021 /* VCableDriverTests.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; name = VCableDriverTests.cpp; path = ../VCableDriverTests/VCableDriverTests.cpp; sourceTree = "<group>"; };
+		100000000000000000000022 /* VCableDriverTests */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = VCableDriverTests; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		100000000000000000000005 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		100000000000000000000023 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		100000000000000000000006 = {
+			isa = PBXGroup;
+			children = (
+				100000000000000000000002 /* VCableDriver.cpp */,
+				100000000000000000000003 /* Info.plist */,
+				100000000000000000000021 /* VCableDriverTests.cpp */,
+				100000000000000000000007 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		100000000000000000000007 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				100000000000000000000004 /* VCableDriver.driver */,
+				100000000000000000000022 /* VCableDriverTests */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		100000000000000000000008 /* VCableDriver */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 100000000000000000000009 /* Build configuration list for PBXNativeTarget "VCableDriver" */;
+			buildPhases = (
+				10000000000000000000000A /* Sources */,
+				100000000000000000000005 /* Frameworks */,
+				10000000000000000000000B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = VCableDriver;
+			productName = VCableDriver;
+			productReference = 100000000000000000000004 /* VCableDriver.driver */;
+			productType = "com.apple.product-type.bundle";
+		};
+		100000000000000000000024 /* VCableDriverTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 100000000000000000000026 /* Build configuration list for PBXNativeTarget "VCableDriverTests" */;
+			buildPhases = (
+				100000000000000000000025 /* Sources */,
+				100000000000000000000023 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				100000000000000000000029 /* PBXTargetDependency */,
+			);
+			name = VCableDriverTests;
+			productName = VCableDriverTests;
+			productReference = 100000000000000000000022 /* VCableDriverTests */;
+			productType = "com.apple.product-type.tool";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		10000000000000000000000C /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastUpgradeCheck = 2700;
+				TargetAttributes = {
+					100000000000000000000008 = {
+						CreatedOnToolsVersion = 27.0;
+					};
+					100000000000000000000024 = {
+						CreatedOnToolsVersion = 27.0;
+					};
+				};
+			};
+			buildConfigurationList = 10000000000000000000000D /* Build configuration list for PBXProject "VCableDriver" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 100000000000000000000006;
+			productRefGroup = 100000000000000000000007 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+				targets = (
+				100000000000000000000008 /* VCableDriver */,
+				100000000000000000000024 /* VCableDriverTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		10000000000000000000000B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		10000000000000000000000A /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000001 /* VCableDriver.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		100000000000000000000025 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000020 /* VCableDriverTests.cpp in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		100000000000000000000029 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 100000000000000000000008 /* VCableDriver */;
+			targetProxy = 10000000000000000000002A /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		10000000000000000000000E /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++20";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				ONLY_ACTIVE_ARCH = YES;
+			};
+			name = Debug;
+		};
+		10000000000000000000000F /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_CXX_LANGUAGE_STANDARD = "c++20";
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				COPY_PHASE_STRIP = YES;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		100000000000000000000010 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = NO;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				GCC_SYMBOLS_PRIVATE_EXTERN = YES;
+				INFOPLIST_FILE = Info.plist;
+				INSTALL_PATH = "/Library/Audio/Plug-Ins/HAL";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACH_O_TYPE = mh_bundle;
+				MARKETING_VERSION = 0.1.0;
+				OTHER_CPLUSPLUSFLAGS = (
+					"$(inherited)",
+					"-Wall",
+					"-Wextra",
+					"-Wpedantic",
+					"-Werror",
+				);
+				OTHER_LDFLAGS = (
+					"-framework",
+					CoreAudio,
+					"-framework",
+					CoreFoundation,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.vcable.driver;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = NO;
+				SUPPORTED_PLATFORMS = macosx;
+				WRAPPER_EXTENSION = driver;
+			};
+			name = Debug;
+		};
+		100000000000000000000011 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGN_IDENTITY = "-";
+				CODE_SIGN_STYLE = Manual;
+				COMBINE_HIDPI_IMAGES = YES;
+				CURRENT_PROJECT_VERSION = 1;
+				DEFINES_MODULE = NO;
+				DYLIB_COMPATIBILITY_VERSION = 1;
+				DYLIB_CURRENT_VERSION = 1;
+				GCC_SYMBOLS_PRIVATE_EXTERN = YES;
+				INFOPLIST_FILE = Info.plist;
+				INSTALL_PATH = "/Library/Audio/Plug-Ins/HAL";
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				MACH_O_TYPE = mh_bundle;
+				MARKETING_VERSION = 0.1.0;
+				OTHER_CPLUSPLUSFLAGS = (
+					"$(inherited)",
+					"-Wall",
+					"-Wextra",
+					"-Wpedantic",
+					"-Werror",
+				);
+				OTHER_LDFLAGS = (
+					"-framework",
+					CoreAudio,
+					"-framework",
+					CoreFoundation,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = dev.vcable.driver;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = NO;
+				SUPPORTED_PLATFORMS = macosx;
+				WRAPPER_EXTENSION = driver;
+			};
+			name = Release;
+		};
+		100000000000000000000027 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				OTHER_CPLUSPLUSFLAGS = (
+					"$(inherited)",
+					"-Wall",
+					"-Wextra",
+					"-Wpedantic",
+					"-Werror",
+				);
+				OTHER_LDFLAGS = (
+					"-framework",
+					CoreAudio,
+					"-framework",
+					CoreFoundation,
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = Debug;
+		};
+		100000000000000000000028 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGNING_ALLOWED = NO;
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				OTHER_CPLUSPLUSFLAGS = (
+					"$(inherited)",
+					"-Wall",
+					"-Wextra",
+					"-Wpedantic",
+					"-Werror",
+				);
+				OTHER_LDFLAGS = (
+					"-framework",
+					CoreAudio,
+					"-framework",
+					CoreFoundation,
+				);
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = macosx;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		100000000000000000000009 /* Build configuration list for PBXNativeTarget "VCableDriver" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000010 /* Debug */,
+				100000000000000000000011 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		10000000000000000000000D /* Build configuration list for PBXProject "VCableDriver" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				10000000000000000000000E /* Debug */,
+				10000000000000000000000F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		100000000000000000000026 /* Build configuration list for PBXNativeTarget "VCableDriverTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				100000000000000000000027 /* Debug */,
+				100000000000000000000028 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 10000000000000000000000C /* Project object */;
+}

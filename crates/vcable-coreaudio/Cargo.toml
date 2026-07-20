@@ -1,0 +1,11 @@
+[package]
+name = "vcable-coreaudio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vcable-core = { path = "../vcable-core" }
+
+[lints]
+workspace = true

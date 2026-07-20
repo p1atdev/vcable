@@ -3,5 +3,32 @@
 version = 4
 
 [[package]]
-name = "vcable"
+name = "vcable-core"
 version = "0.1.0"
+
+[[package]]
+name = "vcable-coreaudio"
+version = "0.1.0"
+dependencies = [
+ "vcable-core",
+]
+
+[[package]]
+name = "vcable-protocol"
+version = "0.1.0"
+
+[[package]]
+name = "vcablectl"
+version = "0.1.0"
+dependencies = [
+ "vcable-protocol",
+]
+
+[[package]]
+name = "vcabled"
+version = "0.1.0"
+dependencies = [
+ "vcable-core",
+ "vcable-coreaudio",
+ "vcable-protocol",
+]

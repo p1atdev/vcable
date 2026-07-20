@@ -1,0 +1,14 @@
+[package]
+name = "vcabled"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vcable-core = { path = "../vcable-core" }
+vcable-coreaudio = { path = "../vcable-coreaudio" }
+vcable-protocol = { path = "../vcable-protocol" }
+
+[lints]
+workspace = true
+
